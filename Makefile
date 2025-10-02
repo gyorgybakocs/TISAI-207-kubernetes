@@ -1,5 +1,9 @@
 
 BASE_NAMES = POSTGRES LANGFLOW
+SERVICES = POSTGRES LANGFLOW
+DEPLOYS = POSTGRES LANGFLOW
+PORTFORWARD = POSTGRES LANGFLOW
+PODS = postgres langflow
 
 aws-login: apply-config
 	@echo "======================= CONFIGURING AWS CLI =========================="
@@ -124,61 +128,56 @@ build-k8s-langflow:
 	@echo "----------------- Logs for Langflow build job -------------------"
 	kubectl logs job/langflow-build --follow
 
+# destroy
+delete-pods:
+	@for pod in $(PODS); do \
+		echo "----------------- Deleting $$pod_app pods... -------------------"; \
+		kubectl delete pods -l app=$$pod --ignore-not-found=true; \
+	done
+
 # Kubernetes Deployment
-up-k8s: down-k8s up-k8s-postgres port-forward-postgres up-k8s-langflow port-forward-langflow
+up-k8s: down-k8s delete-pods create-services deploy-k8s port-forward-services init-langflow-users
 	@echo "----------------- Listing running Kubernetes pods -------------------"
 	kubectl get pods
 
-up-k8s-postgres:
-	@echo "----------------- Delete Postgres pods... -------------------"
-	@kubectl delete pods -l app=postgres
+create-services:
+	@for service in $(SERVICES); do \
+		echo "----------------- Creating $$service Service -------------------"; \
+		service_lower=$$(echo $$service | tr 'A-Z' 'a-z'); \
+		config_map=$${service_lower}-config; \
+        \
+        SERVICE=$$(kubectl get configmap $$config_map -o jsonpath="{.data.$${service}_SERVICE}"); \
+        PORT=$$(kubectl get configmap $$config_map -o jsonpath="{.data.$${service}_PORT}"); \
+        export SERVICE PORT; \
+        envsubst < kubernetes/$${service_lower}/$${service_lower}-service.yaml | kubectl apply -f -; \
+	done
 
-	@echo "----------------- Creating Postgres Service -------------------"
-	@POSTGRES_HOST=$$(kubectl get configmap postgres-config -o jsonpath='{.data.POSTGRES_HOST}'); \
-    POSTGRES_PORT=$$(kubectl get configmap postgres-config -o jsonpath='{.data.POSTGRES_PORT}'); \
-    export POSTGRES_HOST POSTGRES_PORT; \
-    envsubst < kubernetes/postgres/postgres-service.yaml | kubectl apply -f -
-
-	@echo "----------------- Deploying Postgres to Kubernetes -------------------"
-	@REGISTRY_HOST=$$(minikube ip); \
-    POSTGRES_BUILT_IMAGE=$$(kubectl get configmap postgres-config -o jsonpath='{.data.POSTGRES_BUILT_IMAGE}'); \
-    POSTGRES_PORT=$$(kubectl get configmap postgres-config -o jsonpath='{.data.POSTGRES_PORT}'); \
-    export REGISTRY_HOST POSTGRES_BUILT_IMAGE POSTGRES_PORT; \
-	envsubst < kubernetes/postgres/postgres-deployment.yaml | kubectl apply -f -
-	@echo "----------------- Waiting for Postgres pod to be ready -------------------"
-	kubectl wait --for=condition=ready pod -l app=postgres --timeout=60s
-
-	@echo "----------------- Testing Postgres Service -------------------"
-	@POSTGRES_HOST=$$(kubectl get configmap postgres-config -o jsonpath='{.data.POSTGRES_HOST}'); \
-	kubectl get service $$POSTGRES_HOST
-
-up-k8s-langflow:
-	@echo "----------------- Delete Langflow pods... -------------------"
-	@kubectl delete pods -l app=langflow
-
-	@echo "----------------- Creating Langflow Service -------------------"
-	@LANGFLOW_SERVICE=$$(kubectl get configmap langflow-config -o jsonpath='{.data.LANGFLOW_SERVICE}'); \
-    LANGFLOW_PORT=$$(kubectl get configmap langflow-config -o jsonpath='{.data.LANGFLOW_PORT}'); \
-    export LANGFLOW_SERVICE LANGFLOW_PORT; \
-    envsubst < kubernetes/langflow/langflow-service.yaml | kubectl apply -f -
-
-	@echo "----------------- Deploying Langflow to Kubernetes -------------------"
-	@REGISTRY_HOST=$$(minikube ip); \
-    LANGFLOW_BUILT_IMAGE=$$(kubectl get configmap langflow-config -o jsonpath='{.data.LANGFLOW_BUILT_IMAGE}'); \
-    LANGFLOW_PORT=$$(kubectl get configmap langflow-config -o jsonpath='{.data.LANGFLOW_PORT}'); \
-    export REGISTRY_HOST LANGFLOW_BUILT_IMAGE LANGFLOW_PORT; \
-	envsubst < kubernetes/langflow/langflow-deployment.yaml | kubectl apply -f -
-	@echo "----------------- Waiting for Langflow pod to be ready -------------------"
-	kubectl wait --for=condition=ready pod -l app=langflow --timeout=180s
-
-	@echo "----------------- Testing Langflow Service -------------------"
-	@LANGFLOW_SERVICE=$$(kubectl get configmap langflow-config -o jsonpath='{.data.LANGFLOW_SERVICE}'); \
-    kubectl get service $$LANGFLOW_SERVICE
+deploy-k8s:
+	@for deploy in $(DEPLOYS); do \
+		echo "----------------- Deploying $$deploy to Kubernetes -------------------"; \
+		deploy_lower=$$(echo $$deploy | tr 'A-Z' 'a-z'); \
+		config_map="$${deploy_lower}-config"; \
+		\
+		REGISTRY_HOST=$$(minikube ip); \
+		BUILT_IMAGE=$$(kubectl get configmap $$config_map -o jsonpath="{.data.$${deploy}_BUILT_IMAGE}"); \
+		PORT=$$(kubectl get configmap $$config_map -o jsonpath="{.data.$${deploy}_PORT}"); \
+		export REGISTRY_HOST BUILT_IMAGE PORT; \
+		\
+		envsubst < kubernetes/$$deploy_lower/$$deploy_lower-deployment.yaml | kubectl apply -f -; \
+		\
+		echo "----------------- Waiting for $$deploy_lower pod to be ready -------------------"; \
+		kubectl wait --for=condition=ready pod -l app=$$deploy_lower --timeout=180s; \
+		\
+		echo "----------------- Testing $$deploy_lower Service -------------------"; \
+		SERVICE_NAME=$$(kubectl get configmap $$config_map -o jsonpath="{.data.$${deploy}_SERVICE}"); \
+		kubectl get service $$SERVICE_NAME; \
+	done
 
 down-k8s:
 	@echo "----------------- Deleting Deployed Services Commander from Kubernetes -------------------"
 	kubectl delete -f kubernetes/postgres/postgres-deployment.yaml --ignore-not-found=true
 	kubectl delete -f kubernetes/langflow/langflow-deployment.yaml --ignore-not-found=true
+	@PODS=""
 
 ps-k8s:
 	@echo "----------------- Listing running Kubernetes pods -------------------"
@@ -186,15 +185,33 @@ ps-k8s:
 	@echo "----------------- Listing Kubernetes services -------------------"
 	kubectl get services
 
+#inits
+
+init-langflow-users:
+	@echo "----------------- Executing init scripts inside the Langflow container -------------------"
+	@LANGFLOW_POD=$$(kubectl get pods -l app=langflow -o jsonpath='{.items[0].metadata.name}'); \
+	echo "--- Creating /app/tmp directory inside the pod ---"; \
+	kubectl exec "$${LANGFLOW_POD}" -- mkdir -p /app/tmp; \
+	echo "--- Running init_service_user.py in pod: $${LANGFLOW_POD} ---"; \
+	kubectl exec "$${LANGFLOW_POD}" -- python /app/init/python/init_service_user.py; \
+	echo "--- Running init_public_user.py in pod: $${LANGFLOW_POD} ---"; \
+	kubectl exec "$${LANGFLOW_POD}" -- python /app/init/python/init_public_user.py;
+	@echo "----------------- Init scripts finished successfully. -------------------"
+
 #port forwarding
-port-forward-postgres:
-	@echo "----------------- Forwarding Postgres to localhost (in background)... -------------------"
-	@POSTGRES_PORT=$$(kubectl get configmap postgres-config -o jsonpath='{.data.POSTGRES_PORT}'); \
-	POSTGRES_REDIRECT_PORT=$$(kubectl get configmap postgres-config -o jsonpath='{.data.POSTGRES_REDIRECT_PORT}'); \
-	export POSTGRES_PORT POSTGRES_REDIRECT_PORT; \
-	nohup kubectl port-forward "$$(kubectl get pods -l app=postgres -o jsonpath='{.items[0].metadata.name}')" "$${POSTGRES_REDIRECT_PORT}:$${POSTGRES_PORT}" > /dev/null 2>&1 & \
-	echo "Waiting for port-forward..." && sleep 5 && \
-	echo "----------------- Postgres should be accessible at localhost:$${POSTGRES_REDIRECT_PORT} -------------------"
+port-forward-services:
+	@for portforward in $(PORTFORWARD); do \
+		echo "----------------- Forwarding $$portforward to localhost (in background)... -------------------"; \
+		portforward_lower=$$(echo $$portforward | tr 'A-Z' 'a-z'); \
+		config_map=$${portforward_lower}-config; \
+        \
+        PORT=$$(kubectl get configmap $$config_map -o jsonpath="{.data.$${portforward}_PORT}"); \
+        REDIRECT_PORT=$$(kubectl get configmap $$config_map -o jsonpath="{.data.$${portforward}_REDIRECT_PORT}"); \
+        export PORT REDIRECT_PORT; \
+        nohup kubectl port-forward "$$(kubectl get pods -l app=$${portforward_lower} -o jsonpath='{.items[0].metadata.name}')" "$${REDIRECT_PORT}:$${PORT}" > /dev/null 2>&1 & \
+        echo "Waiting for port-forward..." && sleep 5 && \
+        echo "----------------- $$portforward should be accessible at localhost:$${REDIRECT_PORT} -------------------"; \
+	done
 
 port-forward-langflow:
 	@echo "----------------- Forwarding Langflow to localhost (in background)... -------------------"

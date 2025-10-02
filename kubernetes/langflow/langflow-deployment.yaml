@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: langflow
-          image: ${REGISTRY_HOST}:30500/${LANGFLOW_BUILT_IMAGE}
+          image: ${REGISTRY_HOST}:30500/${BUILT_IMAGE}
           imagePullPolicy: Always
           ports:
             - containerPort: 7860

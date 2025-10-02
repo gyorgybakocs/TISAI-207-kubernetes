@@ -1,12 +1,12 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: ${POSTGRES_HOST}
+  name: ${SERVICE}
 spec:
   selector:
     app: postgres
   ports:
     - protocol: TCP
-      port: ${POSTGRES_PORT}
-      targetPort: ${POSTGRES_PORT}
+      port: ${PORT}
+      targetPort: ${PORT}
   type: ClusterIP
