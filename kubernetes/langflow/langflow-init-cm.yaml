@@ -1,0 +1,77 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: langflow-init-users
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: langflow-init
+          image: registry.default.svc.cluster.local:5000/langflow/langflow:built
+          imagePullPolicy: Always
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo 'Waiting for Langflow service to be ready...'
+              until curl -s http://langflow:7860/health; do
+                echo -n '.'
+                sleep 2
+              done
+              echo 'Langflow is ready. Running init scripts...'
+              python /scripts/init_service_user.py && \
+              python /scripts/init_public_user.py
+              echo 'Init scripts finished.'
+          envFrom:
+            - configMapRef:
+                name: langflow-config
+            - secretRef:
+                name: langflow-secret
+          env:
+            - name: LANGFLOW_URL
+              value: "http://langflow:7860"
+            - name: POSTGRES_DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: langflow-config
+                  key: POSTGRES_DB_NAME
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: postgres-config
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_SERVICE
+              valueFrom:
+                configMapKeyRef:
+                  name: postgres-config
+                  key: POSTGRES_HOST
+            - name: POSTGRES_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: postgres-config
+                  key: POSTGRES_PORT
+            - name: LANGFLOW_DATABASE_URL
+              value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_SERVICE):$(POSTGRES_PORT)/$(POSTGRES_DB_NAME)"
+
+          volumeMounts:
+            - name: init-scripts
+              mountPath: /scripts
+            - name: init-flows
+              mountPath: /app/init
+
+      volumes:
+        - name: init-scripts
+          configMap:
+            name: langflow-init-scripts
+            defaultMode: 0755
+        - name: init-flows
+          hostPath:
+            path: /workspace/init/
+            type: Directory
+  backoffLimit: 4
+
