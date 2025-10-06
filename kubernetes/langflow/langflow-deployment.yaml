@@ -59,16 +59,16 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 30
-          readinessProbe:
-            tcpSocket:
-              port: 7860
-            initialDelaySeconds: 10
-            periodSeconds: 10
-          livenessProbe:
-            tcpSocket:
-              port: 7860
-            initialDelaySeconds: 15
-            periodSeconds: 10
+#          readinessProbe:
+#            tcpSocket:
+#              port: 7860
+#            initialDelaySeconds: 10
+#            periodSeconds: 10
+#          livenessProbe:
+#            tcpSocket:
+#              port: 7860
+#            initialDelaySeconds: 15
+#            periodSeconds: 10
           volumeMounts:
             - name: tis-components
               mountPath: /app/tis_components

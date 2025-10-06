@@ -9,7 +9,7 @@ fi
 FLOW_ID=$1
 API_KEY=$2
 # Worker counts to test. Feel free to adjust this list.
-WORKER_COUNTS="2 4 8 12 16"
+WORKER_COUNTS="1 1 2 3 4 8 12 16 32"
 BEST_WORKERS=0
 MAX_RPS=0.0
 
@@ -27,7 +27,7 @@ for workers in $WORKER_COUNTS; do
   kubectl rollout status deployment/langflow --timeout=180s
 
   echo "Running load test against internal service (http://langflow:7860)..."
-  RESULT=$(hey -n 200 -c 20 -H "x-api-key: $API_KEY" -m POST -d '{"input_value": "hello"}' "http://langflow:7860/api/v1/run/$FLOW_ID?stream=false")
+  RESULT=$(hey -z 30s -c 10 -disable-keepalive -H "x-api-key: $API_KEY" -m POST -d '{"input_value":"hello"}' "http://langflow:7860/api/v1/run/$FLOW_ID?stream=false")
   RPS=$(echo "$RESULT" | awk '/Requests\/sec:/ {print $2}')
 
   echo "Result: $RPS Requests/sec"

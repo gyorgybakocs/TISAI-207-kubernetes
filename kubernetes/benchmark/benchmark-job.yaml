@@ -11,7 +11,7 @@ spec:
           image: ${REGISTRY_HOST}:30500/benchmark:latest
           imagePullPolicy: Always
           # Pass FLOW_ID and API_KEY as arguments to the script
-          args: ["$(FLOW_ID)", "$(API_KEY)"]
+          args: ["${FLOW_ID}", "${API_KEY}"]
           volumeMounts:
             - name: workspace
               mountPath: /workspace

@@ -56,12 +56,12 @@ mk-config:
 	minikube config unset insecure-registry || true
 	minikube config set insecure-registry "registry.default.svc.cluster.local:5000"
 	minikube config set insecure-registry "localhost:5000"
-	minikube config set memory 6144
-	minikube config set cpus 2
+	minikube config set memory 92160
+	minikube config set cpus 28
 
 mk-up: mk-config
 	@echo "----------------- Starting Minikube -------------------"
-	minikube start --insecure-registry="192.168.0.0/16"
+	minikube start --insecure-registry="192.168.0.0/16" --force
 
 mk-stop:
 	@echo "----------------- Stopping Minikube -------------------"
@@ -69,7 +69,7 @@ mk-stop:
 
 mk-delete:
 	@echo "----------------- Deleting Minikube cluster -------------------"
-	minikube delete
+	-minikube delete
 
 mk-restart: mk-stop mk-up
 	@echo "----------------- Restarting Minikube -------------------"
@@ -158,7 +158,10 @@ run-benchmark:
 	@echo "--- Applying Benchmark RBAC and running Job ---"
 	@kubectl apply -f kubernetes/benchmark/rbac.yaml
 	@kubectl delete job langflow-benchmark --ignore-not-found=true
-	@REGISTRY_HOST=$$(minikube ip) envsubst < kubernetes/benchmark/benchmark-job.yaml | kubectl apply -f -
+	@export REGISTRY_HOST=$$(minikube ip); \
+	export FLOW_ID='$(FLOW_ID)'; \
+	export API_KEY='$(API_KEY)'; \
+	envsubst < kubernetes/benchmark/benchmark-job.yaml | kubectl apply -f -
 	@echo "--- Waiting for benchmark pod to start..."
 	@BENCHMARK_POD_NAME=""; \
 	while [ -z "$$BENCHMARK_POD_NAME" ]; do \
@@ -166,10 +169,13 @@ run-benchmark:
 		sleep 1; \
 		BENCHMARK_POD_NAME=$$(kubectl get pods -l job-name=langflow-benchmark -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); \
 	done; \
-	echo "\nBenchmark pod started: $$BENCHMARK_POD_NAME. Streaming logs in real-time..."; \
-	kubectl logs -f "$$BENCHMARK_POD_NAME"; \
+	echo "\nWaiting for benchmark pod to be ready..."; \
+    kubectl wait --for=condition=ready pod/$$BENCHMARK_POD_NAME --timeout=120s; \
+    echo "Benchmark pod is ready: $$BENCHMARK_POD_NAME. Streaming logs in real-time..."; \
+    kubectl logs -f "$$BENCHMARK_POD_NAME"; \
 	\
 	echo "--- Log stream finished. Verifying final Job status... ---"; \
+	sleep 5; \
 	JOB_STATUS=$$(kubectl get job langflow-benchmark -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}'); \
 	if [ "$$JOB_STATUS" != "True" ]; then \
 		echo "!!! Benchmark job did not complete successfully. Check logs above for errors. !!!"; \
