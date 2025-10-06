@@ -1,0 +1,24 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: langflow-benchmark
+spec:
+  template:
+    spec:
+      serviceAccountName: benchmark-sa
+      containers:
+        - name: benchmark
+          image: ${REGISTRY_HOST}:30500/benchmark:latest
+          imagePullPolicy: Always
+          # Pass FLOW_ID and API_KEY as arguments to the script
+          args: ["$(FLOW_ID)", "$(API_KEY)"]
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+      restartPolicy: Never
+      volumes:
+        - name: workspace
+          hostPath:
+            path: /workspace
+            type: Directory
+  backoffLimit: 1

@@ -76,7 +76,7 @@ spec:
               mountPath: /app/flows
             - name: logs-data
               mountPath: /app/logs
-            - name: init-scripts
+            - name: init-scripts-python
               mountPath: /app/init/python
 
       volumes:
@@ -90,7 +90,7 @@ spec:
         - name: logs-data
           persistentVolumeClaim:
             claimName: langflow-logs-pvc
-        - name: init-scripts
+        - name: init-scripts-python
           hostPath:
             path: /workspace/kubernetes/langflow/init/python/
             type: Directory

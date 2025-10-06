@@ -114,19 +114,21 @@ build-k8s: mk-setup build-k8s-postgres build-k8s-langflow
 
 build-k8s-postgres:
 	@echo "----------------- Building Postgres for Kubernetes -------------------"
-	kubectl delete job postgres-build --ignore-not-found=true
-	kubectl apply -f kubernetes/postgres/postgres-build-job.yaml
-	kubectl wait --for=condition=complete job/postgres-build --timeout=90s
-	@echo "----------------- Logs for Postgres build job -------------------"
-	kubectl logs job/postgres-build --follow
+	@kubectl delete job postgres-build --ignore-not-found=true
+	@kubectl apply -f kubernetes/postgres/postgres-build-job.yaml
+	@echo "Waiting for Postgres build job to complete..."
+	@kubectl wait --for=condition=complete job/postgres-build --timeout=90s || \
+		(echo "!!! Postgres build failed, showing logs: !!!" && kubectl logs job/postgres-build --follow && exit 1)
+	@echo "Postgres build completed successfully."
 
 build-k8s-langflow:
 	@echo "----------------- Building Langflow for Kubernetes -------------------"
-	kubectl delete job langflow-build --ignore-not-found=true
-	kubectl apply -f kubernetes/langflow/langflow-build-job.yaml
-	kubectl wait --for=condition=complete job/langflow-build --timeout=90s
-	@echo "----------------- Logs for Langflow build job -------------------"
-	kubectl logs job/langflow-build --follow
+	@kubectl delete job langflow-build --ignore-not-found=true
+	@kubectl apply -f kubernetes/langflow/langflow-build-job.yaml
+	@echo "Waiting for Langflow build job to complete..."
+	@kubectl wait --for=condition=complete job/langflow-build --timeout=120s || \
+		(echo "!!! Langflow build failed, showing logs: !!!" && kubectl logs job/langflow-build --follow && exit 1)
+	@echo "Langflow build completed successfully."
 
 # destroy
 delete-pods:
@@ -136,9 +138,70 @@ delete-pods:
 	done
 
 # Kubernetes Deployment
-up-k8s: down-k8s delete-pods create-services deploy-k8s port-forward-services init-langflow-users
-	@echo "----------------- Listing running Kubernetes pods -------------------"
+
+build-benchmark-image:
+	@echo "----------------- Starting port-forward to local registry for benchmark image -------------------"
+	@kubectl port-forward svc/registry 5000:5000 & export BG_PID=$$!; \
+	echo "Waiting for port-forward (PID: $$BG_PID)..." && sleep 5; \
+	echo "----------------- Building and Pushing Benchmark Image -------------------"; \
+	docker build -t localhost:5000/benchmark:latest -f kubernetes/benchmark/docker/Dockerfile kubernetes/benchmark; \
+	docker push localhost:5000/benchmark:latest; \
+	echo "----------------- Killing port-forward process (PID: $$BG_PID) -------------------"; \
+	kill $$BG_PID;
+
+prepare-benchmark:
+	@echo "--- Preparing benchmark environment ---"
+	@LANGFLOW_POD=$$(kubectl get pods -l app=langflow -o jsonpath='{.items[0].metadata.name}'); \
+	kubectl exec "$${LANGFLOW_POD}" -- python /app/init/python/init_benchmark_flow.py;
+
+run-benchmark:
+	@echo "--- Applying Benchmark RBAC and running Job ---"
+	@kubectl apply -f kubernetes/benchmark/rbac.yaml
+	@kubectl delete job langflow-benchmark --ignore-not-found=true
+	@REGISTRY_HOST=$$(minikube ip) envsubst < kubernetes/benchmark/benchmark-job.yaml | kubectl apply -f -
+	@echo "--- Waiting for benchmark pod to start..."
+	@BENCHMARK_POD_NAME=""; \
+	while [ -z "$$BENCHMARK_POD_NAME" ]; do \
+		echo -n "."; \
+		sleep 1; \
+		BENCHMARK_POD_NAME=$$(kubectl get pods -l job-name=langflow-benchmark -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); \
+	done; \
+	echo "\nBenchmark pod started: $$BENCHMARK_POD_NAME. Streaming logs in real-time..."; \
+	kubectl logs -f "$$BENCHMARK_POD_NAME"; \
+	\
+	echo "--- Log stream finished. Verifying final Job status... ---"; \
+	JOB_STATUS=$$(kubectl get job langflow-benchmark -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}'); \
+	if [ "$$JOB_STATUS" != "True" ]; then \
+		echo "!!! Benchmark job did not complete successfully. Check logs above for errors. !!!"; \
+		exit 1; \
+	fi; \
+	\
+	echo "--- Benchmark Job completed successfully. Retrieving final result. ---"; \
+	minikube ssh 'sudo cat /workspace/.optimal_workers' > .optimal_workers; \
+	echo "Optimal worker count saved to local .optimal_workers file."
+
+init-k8s: up-k8s init-langflow-users
+	@echo "----------------- Preparing for benchmark... -------------------"; \
+	BENCHMARK_PREP_LOG=$$( $(MAKE) prepare-benchmark ); \
+	echo "$${BENCHMARK_PREP_LOG}"; \
+	FLOW_ID=$$(echo "$${BENCHMARK_PREP_LOG}" | grep 'BENCHMARK_DATA:FLOW_ID=' | cut -d'=' -f2 | tr -d '\r'); \
+	API_KEY=$$(echo "$${BENCHMARK_PREP_LOG}" | grep 'BENCHMARK_DATA:API_KEY=' | cut -d'=' -f2 | tr -d '\r'); \
+	if [ -z "$$FLOW_ID" ] || [ -z "$$API_KEY" ]; then \
+		echo "!!! Error: Could not extract benchmark data. Aborting benchmark. !!!"; \
+		exit 1; \
+	fi; \
+	\
+	echo "----------------- Building benchmark image... -------------------"; \
+	$(MAKE) build-benchmark-image; \
+	\
+	echo "----------------- Running benchmark job... -------------------"; \
+	$(MAKE) run-benchmark FLOW_ID=$$FLOW_ID API_KEY=$$API_KEY
+
+up-k8s: down-k8s delete-pods update-worker-config create-services deploy-k8s port-forward-services
+	@echo "----------------- System is up. Listing running Kubernetes pods -------------------"
 	kubectl get pods
+	@echo "----------------- Checking Worker Status -------------------"
+	@$(MAKE) check-workers
 
 create-services:
 	@for service in $(SERVICES); do \
@@ -175,15 +238,15 @@ deploy-k8s:
 
 down-k8s:
 	@echo "----------------- Deleting Deployed Services Commander from Kubernetes -------------------"
-	kubectl delete -f kubernetes/postgres/postgres-deployment.yaml --ignore-not-found=true
-	kubectl delete -f kubernetes/langflow/langflow-deployment.yaml --ignore-not-found=true
+	@kubectl delete -f kubernetes/postgres/postgres-deployment.yaml --ignore-not-found=true
+	@kubectl delete -f kubernetes/langflow/langflow-deployment.yaml --ignore-not-found=true
 	@PODS=""
 
 ps-k8s:
 	@echo "----------------- Listing running Kubernetes pods -------------------"
-	kubectl get pods
+	@kubectl get pods
 	@echo "----------------- Listing Kubernetes services -------------------"
-	kubectl get services
+	@kubectl get services
 
 #inits
 
@@ -233,3 +296,34 @@ reset-db:
 logs:
 	@echo "----------------- Following logs for Postgres pod -------------------"
 	@kubectl logs -f $$(kubectl get pods -l app=postgres -o jsonpath='{.items[0].metadata.name}')
+
+update-worker-config:
+	@echo "--- Checking for optimal worker configuration ---"; \
+	if [ -f ".optimal_workers" ]; then \
+		WORKERS=$$(cat .optimal_workers); \
+		echo "--- Found optimal worker config. Setting LANGFLOW_WORKERS to $${WORKERS} from .optimal_workers file. ---"; \
+		kubectl patch configmap langflow-config --patch "{\"data\":{\"LANGFLOW_WORKERS\":\"$${WORKERS}\"}}"; \
+	fi
+
+check-workers:
+	@echo "--- Checking Langflow worker status ---"; \
+	CONFIGURED_WORKERS=$$(kubectl get configmap langflow-config -o jsonpath='{.data.LANGFLOW_WORKERS}' 2>/dev/null || echo "Not Set"); \
+	LANGFLOW_POD=$$(kubectl get pods -l app=langflow -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); \
+	\
+	if [ -z "$$LANGFLOW_POD" ]; then \
+		echo "Langflow pod not found."; \
+		RUNNING_PROCESSES=0; \
+	else \
+		COMMAND_TO_RUN="ps -ef | grep '[g]unicorn' | wc -l"; \
+		RUNNING_PROCESSES=$$(kubectl exec "$${LANGFLOW_POD}" -- sh -c "$$COMMAND_TO_RUN" 2>/dev/null | tr -d '[:space:]' || echo "0"); \
+	fi; \
+	\
+	RUNNING_WORKERS=0; \
+	if [ "$${RUNNING_PROCESSES}" -gt "0" ]; then \
+		RUNNING_WORKERS=$$((RUNNING_PROCESSES - 1)); \
+	fi; \
+	\
+	echo "Configured workers (in ConfigMap): $${CONFIGURED_WORKERS}"; \
+	echo "Running Gunicorn master + workers (in pod): $${RUNNING_PROCESSES}"; \
+	echo "Actual running worker processes: $${RUNNING_WORKERS}";
+
