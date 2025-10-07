@@ -56,8 +56,10 @@ mk-config:
 	minikube config unset insecure-registry || true
 	minikube config set insecure-registry "registry.default.svc.cluster.local:5000"
 	minikube config set insecure-registry "localhost:5000"
-	minikube config set memory 92160
-	minikube config set cpus 28
+	# Allocate 384GB of RAM (384 * 1024 = 393216)
+	minikube config set memory 393216
+	# Allocate 40 CPU cores out of 42
+	minikube config set cpus 40
 
 mk-up: mk-config
 	@echo "----------------- Starting Minikube -------------------"
@@ -136,6 +138,7 @@ delete-pods:
 		echo "----------------- Deleting $$pod_app pods... -------------------"; \
 		kubectl delete pods -l app=$$pod --ignore-not-found=true; \
 	done
+	@-kubectl delete pods -l job-name=langflow-benchmark --force --grace-period=0
 
 # Kubernetes Deployment
 
@@ -144,7 +147,7 @@ build-benchmark-image:
 	@kubectl port-forward svc/registry 5000:5000 & export BG_PID=$$!; \
 	echo "Waiting for port-forward (PID: $$BG_PID)..." && sleep 5; \
 	echo "----------------- Building and Pushing Benchmark Image -------------------"; \
-	docker build -t localhost:5000/benchmark:latest -f kubernetes/benchmark/docker/Dockerfile kubernetes/benchmark; \
+	docker build --no-cache -t localhost:5000/benchmark:latest -f kubernetes/benchmark/docker/Dockerfile kubernetes/benchmark; \
 	docker push localhost:5000/benchmark:latest; \
 	echo "----------------- Killing port-forward process (PID: $$BG_PID) -------------------"; \
 	kill $$BG_PID;
@@ -246,6 +249,7 @@ down-k8s:
 	@echo "----------------- Deleting Deployed Services Commander from Kubernetes -------------------"
 	@kubectl delete -f kubernetes/postgres/postgres-deployment.yaml --ignore-not-found=true
 	@kubectl delete -f kubernetes/langflow/langflow-deployment.yaml --ignore-not-found=true
+	@-kubectl delete job langflow-benchmark postgres-build langflow-build
 	@PODS=""
 
 ps-k8s:

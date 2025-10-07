@@ -3,152 +3,93 @@ import sys
 import time
 import requests
 
-# Minimal initializer for a fresh benchmark setup:
-# - logs in
-# - ensures an API key named "benchmark_key"
-# - creates a brand-new flow with an async 0.5s sleeper component
-# - prints FLOW_ID and API_KEY for the benchmark runner
+# FINAL VERSION - This script correctly prepares the benchmark environment.
+# 1. Logs in as the superuser.
+# 2. Creates a dedicated API key for the benchmark.
+# 3. Creates a new flow with a non-cacheable 0.5s sleeper component.
+# 4. Prints BOTH the FLOW_ID and the generated API_KEY for the Makefile.
 
 LANGFLOW_URL = os.getenv("LANGFLOW_URL", "http://localhost:7860").rstrip("/")
 USERNAME = os.getenv("LANGFLOW_SUPERUSER")
 PASSWORD = os.getenv("LANGFLOW_SUPERUSER_PASSWORD")
 
 if not USERNAME or not PASSWORD:
-    print("Error: LANGFLOW_SUPERUSER or LANGFLOW_SUPERUSER_PASSWORD not set", file=sys.stderr)
-    sys.exit(1)
+    sys.exit("Error: Superuser credentials not set.")
 
 def die(msg, err=None):
-    if err:
-        print(f"{msg} | {err}", file=sys.stderr)
-    else:
-        print(msg, file=sys.stderr)
+    """Prints a fatal error and exits."""
+    details = f" | Details: {err}" if err else ""
+    print(f"FATAL: {msg}{details}", file=sys.stderr)
     sys.exit(1)
 
-# 1) Login
+# --- Step 1: Login ---
 try:
+    print("Benchmark Prep: Logging in as superuser...")
+    login_data = {"username": USERNAME, "password": PASSWORD, "grant_type": "password"}
     resp = requests.post(
-        f"{LANGFLOW_URL}/api/v1/login/access-token",
-        data={"username": USERNAME, "password": PASSWORD},
-        timeout=30,
+        f"{LANGFLOW_URL}/api/v1/login",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        data=login_data
     )
     resp.raise_for_status()
     token = resp.json().get("access_token")
     if not token:
-        die("Login succeeded but no access_token in response.")
+        die("Login successful, but no access_token was returned.")
+    print("Benchmark Prep: Login successful.")
 except Exception as e:
-    die("Login failed.", e)
+    die("Login failed", e)
 
 headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-# 2) Ensure API key (create only; no listing/patching)
+# --- Step 2: Create a dedicated API Key for the benchmark ---
 try:
-    # Try to fetch keys; if none or name not found, create one.
-    r = requests.get(f"{LANGFLOW_URL}/api/v1/api_key/", headers=headers, timeout=30)
-    r.raise_for_status()
-    api_keys = (r.json() or {}).get("api_keys", []) or []
-    api_key = None
-    for k in api_keys:
-        if k.get("name") == "benchmark_key" and k.get("api_key"):
-            api_key = k["api_key"]
-            break
+    print("Benchmark Prep: Creating a dedicated API key...")
+    key_payload = {"name": f"benchmark-key-{int(time.time())}"}
+    resp = requests.post(f"{LANGFLOW_URL}/api/v1/api_key/", headers=headers, json=key_payload)
+    resp.raise_for_status()
+    api_key = resp.json().get("api_key")
     if not api_key:
-        r = requests.post(
-            f"{LANGFLOW_URL}/api/v1/api_key/",
-            headers=headers,
-            json={"name": "benchmark_key"},
-            timeout=30,
-        )
-        r.raise_for_status()
-        data = r.json() or {}
-        api_key = data.get("api_key") or data.get("key") or data.get("token")
-    if not api_key:
-        die("Could not obtain API key value.")
+        die("API key created, but the key itself was not returned.")
+    print("Benchmark Prep: API key created successfully.")
 except Exception as e:
-    die("API key ensure failed.", e)
+    die("Failed to create API key", e)
 
-# 3) Create a brand-new flow (no listing/updating; always unique name)
-flow_name = f"BENCHMARK_SLEEP_500ms_{int(time.time())}"
-
-ASYNC_CODE = (
-    "from langflow.custom import CustomComponent\n"
-    "import asyncio\n"
-    "\n"
-    "class Sleeper(CustomComponent):\n"
+# --- Step 3: Create the sleeper flow ---
+flow_name = f"BENCHMARK_SLEEPER_{int(time.time())}"
+SLEEPER_CODE = (
+    "from langflow import CustomComponent\nimport time\n\n"
+    "class SleeperComponent(CustomComponent):\n"
     '    display_name = "Sleeper"\n'
-    '    description = "Waits for 0.5s then echoes the input."\n'
-    "    inputs = [{\"name\": \"input_value\", \"type\": \"str\", \"required\": True}]\n"
-    "    outputs = [{\"name\": \"text\", \"type\": \"str\", \"method\": \"run\"}]\n"
-    "\n"
-    "    async def run(self, input_value: str) -> str:\n"
-    "        await asyncio.sleep(0.5)\n"
-    "        return input_value\n"
+    '    description = "Waits for 0.5s and returns a unique value."\n\n'
+    "    def build(self, input_value: str) -> str:\n"
+    "        time.sleep(0.5)\n"
+    "        return f'{input_value} - {time.time_ns()}'"
 )
-
 flow_payload = {
     "name": flow_name,
-    "description": "Benchmark flow with async 0.5s sleep.",
     "data": {
         "nodes": [
-            {
-                "id": "chat_input",
-                "type": "chat_input",
-                "data": {
-                    "node": {
-                        "template": {
-                            "input_value": {"value": "", "type": "str"}
-                        }
-                    }
-                },
-                "position": {"x": 0, "y": 0},
-            },
-            {
-                "id": "python_code",
-                "type": "python_node",
-                "data": {
-                    "node": {
-                        "template": {
-                            "code": {"value": ASYNC_CODE, "type": "code"},
-                            "input_value": {"value": "{{chat_input.input_value}}", "type": "str"},
-                        }
-                    }
-                },
-                "position": {"x": 400, "y": 0},
-            },
-            {
-                "id": "chat_output",
-                "type": "chat_output",
-                "data": {
-                    "node": {
-                        "template": {
-                            "output_value": {"value": "{{python_code.text}}", "type": "str"}
-                        }
-                    }
-                },
-                "position": {"x": 800, "y": 0},
-            },
+            {"id": "input", "data": {"node": {"template": {"_type": "ChatInput"}}, "type": "ChatInput"}},
+            {"id": "sleeper", "data": {"node": {"template": {"code": {"type": "code", "value": SLEEPER_CODE}, "_type": "CustomComponent"}}, "type": "CustomComponent"}},
+            {"id": "output", "data": {"node": {"template": {"_type": "ChatOutput"}}, "type": "ChatOutput"}},
         ],
         "edges": [
-            {"source": "chat_input", "target": "python_code"},
-            {"source": "python_code", "target": "chat_output"},
+            {"source": "input", "sourceHandle": "text", "target": "sleeper", "targetHandle": "input_value"},
+            {"source": "sleeper", "sourceHandle": "text", "target": "output", "targetHandle": "text"},
         ],
     },
 }
-
 try:
-    r = requests.post(
-        f"{LANGFLOW_URL}/api/v1/flows/",
-        headers=headers,
-        json=flow_payload,
-        timeout=30,
-    )
-    r.raise_for_status()
-    j = r.json() or {}
-    flow_id = j.get("id") or j.get("_id") or j.get("flow_id")
+    print(f"Benchmark Prep: Creating flow '{flow_name}'...")
+    resp = requests.post(f"{LANGFLOW_URL}/api/v1/flows/", headers=headers, json=flow_payload)
+    resp.raise_for_status()
+    flow_id = resp.json().get("id")
     if not flow_id:
-        die("Flow created but no ID found in response.")
+        die("Flow created, but no ID was returned.")
+    print(f"Benchmark Prep: Flow created with ID: {flow_id}")
 except Exception as e:
-    die("Flow creation failed.", e)
+    die("Flow creation failed", e)
 
-# 4) Output for the benchmark job
+# --- Step 4: Output data for the Makefile ---
 print(f"BENCHMARK_DATA:FLOW_ID={flow_id}")
 print(f"BENCHMARK_DATA:API_KEY={api_key}")
