@@ -11,6 +11,19 @@ spec:
       containers:
         - name: kaniko
           image: gcr.io/kaniko-project/executor:latest
+#          image: omio/gcr.io.kaniko-project.executor:latest
+          args:
+            - --force
+            - --dockerfile=kubernetes/langflow/docker/Dockerfile
+            - --context=/workspace
+            - --destination=$(REGISTRY_URL)/$(LANGFLOW_BUILT_IMAGE)
+            - --build-arg=LANGFLOW_PORT=$(LANGFLOW_PORT)
+            - --build-arg=IMAGE_FROM_REGISTRY=$(REGISTRY_URL)/$(LANGFLOW_BUILT_IMAGE)
+            - --insecure
+            - --skip-tls-verify
+          securityContext:
+            runAsUser: 0
+            privileged: true
           workingDir: /workspace
           env:
             - name: LANGFLOW_BUILT_IMAGE
@@ -25,14 +38,6 @@ spec:
                   key: LANGFLOW_PORT
             - name: REGISTRY_URL
               value: "registry.default.svc.cluster.local:5000"
-          args:
-            - "--dockerfile=kubernetes/langflow/docker/Dockerfile"
-            - "--context=/workspace"
-            - "--destination=$(REGISTRY_URL)/$(LANGFLOW_BUILT_IMAGE)"
-            - "--build-arg=LANGFLOW_PORT=$(LANGFLOW_PORT)"
-            - "--build-arg=IMAGE_FROM_REGISTRY=$(REGISTRY_URL)/$(LANGFLOW_BUILT_IMAGE)"
-            - "--insecure"
-            - "--skip-tls-verify"
           volumeMounts:
             - name: workspace
               mountPath: /workspace

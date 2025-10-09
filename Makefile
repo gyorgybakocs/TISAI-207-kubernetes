@@ -4,6 +4,8 @@ SERVICES = POSTGRES LANGFLOW
 DEPLOYS = POSTGRES LANGFLOW
 PORTFORWARD = POSTGRES LANGFLOW
 PODS = postgres langflow
+DEFAULT_WORKERS ?= 4
+BENCHMARK_TYPE ?= hey
 
 aws-login: apply-config
 	@echo "======================= CONFIGURING AWS CLI =========================="
@@ -56,10 +58,12 @@ mk-config:
 	minikube config unset insecure-registry || true
 	minikube config set insecure-registry "registry.default.svc.cluster.local:5000"
 	minikube config set insecure-registry "localhost:5000"
-	# Allocate 384GB of RAM (384 * 1024 = 393216)
-	minikube config set memory 393216
-	# Allocate 40 CPU cores out of 42
-	minikube config set cpus 40
+	minikube config set memory 20480
+	minikube config set cpus 12
+	# Allocate 120GB of RAM (120 * 1024 = 185344)
+#	minikube config set memory 122880
+#	# Allocate 40 CPU cores out of 61
+#	minikube config set cpus 40
 
 mk-up: mk-config
 	@echo "----------------- Starting Minikube -------------------"
@@ -152,18 +156,32 @@ build-benchmark-image:
 	echo "----------------- Killing port-forward process (PID: $$BG_PID) -------------------"; \
 	kill $$BG_PID;
 
-prepare-benchmark:
-	@echo "--- Preparing benchmark environment ---"
+create-test-flow:
+	@echo "--- Creating test flow for benchmarking ---"
 	@LANGFLOW_POD=$$(kubectl get pods -l app=langflow -o jsonpath='{.items[0].metadata.name}'); \
-	kubectl exec "$${LANGFLOW_POD}" -- python /app/init/python/init_benchmark_flow.py;
+	OUTPUT=$$(kubectl exec "$${LANGFLOW_POD}" -- python /app/init/python/init_benchmark_flow.py); \
+	echo "$$OUTPUT"; \
+	\
+	FLOW_ID=$$(echo "$$OUTPUT" | grep 'BENCHMARK_DATA:FLOW_ID=' | cut -d'=' -f2 | tr -d '\r'); \
+	API_KEY=$$(echo "$$OUTPUT" | grep 'BENCHMARK_DATA:API_KEY=' | cut -d'=' -f2 | tr -d '\r'); \
+	\
+	echo "Saving to ConfigMap and Secret..."; \
+	kubectl patch configmap langflow-config --patch "{\"data\":{\"BENCHMARK_FLOW_ID\":\"$$FLOW_ID\"}}"; \
+	kubectl patch secret langflow-secret --patch "{\"data\":{\"BENCHMARK_API_KEY\":\"$$(echo -n $$API_KEY | base64)\"}}"; \
+	\
+	echo "Saving to local files for verification..."; \
+	echo "$$FLOW_ID" > .benchmark_flow_id; \
+	echo "$$API_KEY" > .benchmark_api_key; \
+	echo "Test flow created. Flow ID saved to .benchmark_flow_id, API key saved to .benchmark_api_key"
 
 run-benchmark:
 	@echo "--- Applying Benchmark RBAC and running Job ---"
 	@kubectl apply -f kubernetes/benchmark/rbac.yaml
 	@kubectl delete job langflow-benchmark --ignore-not-found=true
 	@export REGISTRY_HOST=$$(minikube ip); \
-	export FLOW_ID='$(FLOW_ID)'; \
-	export API_KEY='$(API_KEY)'; \
+	export FLOW_ID=$$(kubectl get configmap langflow-config -o jsonpath='{.data.BENCHMARK_FLOW_ID}'); \
+    export API_KEY=$$(kubectl get secret langflow-secret -o jsonpath='{.data.BENCHMARK_API_KEY}' | base64 --decode); \
+    export BENCHMARK_TYPE=$(BENCHMARK_TYPE); \
 	envsubst < kubernetes/benchmark/benchmark-job.yaml | kubectl apply -f -
 	@echo "--- Waiting for benchmark pod to start..."
 	@BENCHMARK_POD_NAME=""; \
@@ -189,22 +207,8 @@ run-benchmark:
 	minikube ssh 'sudo cat /workspace/.optimal_workers' > .optimal_workers; \
 	echo "Optimal worker count saved to local .optimal_workers file."
 
-init-k8s: up-k8s init-langflow-users
-	@echo "----------------- Preparing for benchmark... -------------------"; \
-	BENCHMARK_PREP_LOG=$$( $(MAKE) prepare-benchmark ); \
-	echo "$${BENCHMARK_PREP_LOG}"; \
-	FLOW_ID=$$(echo "$${BENCHMARK_PREP_LOG}" | grep 'BENCHMARK_DATA:FLOW_ID=' | cut -d'=' -f2 | tr -d '\r'); \
-	API_KEY=$$(echo "$${BENCHMARK_PREP_LOG}" | grep 'BENCHMARK_DATA:API_KEY=' | cut -d'=' -f2 | tr -d '\r'); \
-	if [ -z "$$FLOW_ID" ] || [ -z "$$API_KEY" ]; then \
-		echo "!!! Error: Could not extract benchmark data. Aborting benchmark. !!!"; \
-		exit 1; \
-	fi; \
-	\
-	echo "----------------- Building benchmark image... -------------------"; \
-	$(MAKE) build-benchmark-image; \
-	\
-	echo "----------------- Running benchmark job... -------------------"; \
-	$(MAKE) run-benchmark FLOW_ID=$$FLOW_ID API_KEY=$$API_KEY
+init-k8s: up-k8s init-langflow-users create-test-flow
+	@echo "----------------- Kubernetes initialized. -------------------"
 
 up-k8s: down-k8s delete-pods update-worker-config create-services deploy-k8s port-forward-services
 	@echo "----------------- System is up. Listing running Kubernetes pods -------------------"
@@ -308,12 +312,15 @@ logs:
 	@kubectl logs -f $$(kubectl get pods -l app=postgres -o jsonpath='{.items[0].metadata.name}')
 
 update-worker-config:
-	@echo "--- Checking for optimal worker configuration ---"; \
-	if [ -f ".optimal_workers" ]; then \
+	@echo "--- Checking for optimal worker configuration ---";
+	@if [ -f ".optimal_workers" ]; then \
 		WORKERS=$$(cat .optimal_workers); \
 		echo "--- Found optimal worker config. Setting LANGFLOW_WORKERS to $${WORKERS} from .optimal_workers file. ---"; \
-		kubectl patch configmap langflow-config --patch "{\"data\":{\"LANGFLOW_WORKERS\":\"$${WORKERS}\"}}"; \
-	fi
+	else \
+		WORKERS=$(DEFAULT_WORKERS); \
+		echo "--- .optimal_workers file not found. Setting LANGFLOW_WORKERS to default value: $${WORKERS}. ---"; \
+	fi; \
+	kubectl patch configmap langflow-config --patch "{\"data\":{\"LANGFLOW_WORKERS\":\"$${WORKERS}\"}}";
 
 check-workers:
 	@echo "--- Checking Langflow worker status ---"; \

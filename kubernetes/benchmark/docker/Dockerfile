@@ -1,7 +1,12 @@
 FROM alpine/k8s:1.28.2
-RUN apk --no-cache add hey bc
+RUN apk --no-cache add hey bc py-pip gcc python3-dev musl-dev linux-headers
 
-COPY ../scripts/benchmark.sh /benchmark.sh
-RUN chmod +x /benchmark.sh
+RUN pip install locust
 
-ENTRYPOINT ["/benchmark.sh"]
+WORKDIR /app
+
+COPY ../scripts/benchmark.sh .
+COPY ../scripts/locustfile.py .
+RUN chmod +x benchmark.sh
+
+ENTRYPOINT ["/bin/sh"]
