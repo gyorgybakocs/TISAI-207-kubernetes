@@ -54,16 +54,21 @@ base-build:
 
 # Minikube Management
 mk-config:
-	@echo "----------------- Configuring Minikube -------------------"
-	minikube config unset insecure-registry || true
-	minikube config set insecure-registry "registry.default.svc.cluster.local:5000"
-	minikube config set insecure-registry "localhost:5000"
-	minikube config set memory 20480
-	minikube config set cpus 12
-	# Allocate 120GB of RAM (120 * 1024 = 185344)
-#	minikube config set memory 122880
-#	# Allocate 40 CPU cores out of 61
-#	minikube config set cpus 40
+	@echo "----------------- Dynamically Configuring Minikube VM based on HOST resources -------------------"
+	@CPU_CORES=$$(nproc); \
+	TOTAL_MEM_MB=$$(free -m | awk '/^Mem:/ {print $$2}'); \
+	\
+	MINIKUBE_CPUS=$$(( $$CPU_CORES > 4 ? $$CPU_CORES - 2 : $$CPU_CORES )); \
+	MINIKUBE_MEM_MB=$$(( $$TOTAL_MEM_MB > 8192 ? $$TOTAL_MEM_MB - 4096 : $$TOTAL_MEM_MB )); \
+	\
+	echo "Host has $$CPU_CORES CPUs and $$TOTAL_MEM_MB MB RAM."; \
+	echo "--> Configuring Minikube with $$MINIKUBE_CPUS CPUs and $$MINIKUBE_MEM_MB MB RAM."; \
+	\
+	minikube config unset insecure-registry || true; \
+	minikube config set insecure-registry "registry.default.svc.cluster.local:5000"; \
+	minikube config set insecure-registry "localhost:5000"; \
+	minikube config set memory "$${MINIKUBE_MEM_MB}"; \
+	minikube config set cpus "$${MINIKUBE_CPUS}";
 
 mk-up: mk-config
 	@echo "----------------- Starting Minikube -------------------"
@@ -80,7 +85,25 @@ mk-delete:
 mk-restart: mk-stop mk-up
 	@echo "----------------- Restarting Minikube -------------------"
 
-mk-build: mk-stop mk-delete mk-up mk-setup apply-config apply-instances-config aws-login base-build
+mk-build: mk-stop mk-delete mk-up mk-setup pre-build apply-config apply-instances-config aws-login base-build
+
+pre-build:
+	@echo "----------------- Auto-configuring resource limits -------------------"
+	@CPU_CORES=$$(nproc); \
+	TOTAL_MEM_GB=$$(free -g | awk '/^Mem:/ {print $$2}'); \
+	\
+	export LIMIT_CPU=$$(($$CPU_CORES - 2)); \
+	export LIMIT_MEM=$$(($$TOTAL_MEM_GB - 4))Gi; \
+	\
+	export REQUEST_CPU=1; \
+	export REQUEST_MEM=2Gi; \
+	\
+	echo "Detected $$CPU_CORES CPU cores and $$TOTAL_MEM_GB GB RAM."; \
+	echo "Setting default container limits to: $$LIMIT_CPU cores and $$LIMIT_MEM memory."; \
+	echo "Setting default container requests to: $$REQUEST_CPU core and $$REQUEST_MEM memory."; \
+	\
+	envsubst < kubernetes/limits.yaml.tpl > kubernetes/limits.yaml;
+	@echo "kubernetes/limits.yaml generated successfully."
 
 # Kubernetes Build
 mk-setup:
@@ -204,7 +227,7 @@ run-benchmark:
 	fi; \
 	\
 	echo "--- Benchmark Job completed successfully. Retrieving final result. ---"; \
-	minikube ssh 'sudo cat /workspace/.optimal_workers' > .optimal_workers; \
+	minikube ssh 'sudo cat /app/.optimal_workers' > .optimal_workers; \
 	echo "Optimal worker count saved to local .optimal_workers file."
 
 init-k8s: up-k8s init-langflow-users create-test-flow
@@ -315,16 +338,16 @@ update-worker-config:
 	@echo "--- Checking for optimal worker configuration ---";
 	@if [ -f ".optimal_workers" ]; then \
 		WORKERS=$$(cat .optimal_workers); \
-		echo "--- Found optimal worker config. Setting LANGFLOW_WORKERS to $${WORKERS} from .optimal_workers file. ---"; \
+		echo "--- Found optimal worker config. Setting WEB_CONCURRENCY to $${WORKERS} from .optimal_workers file. ---"; \
 	else \
 		WORKERS=$(DEFAULT_WORKERS); \
-		echo "--- .optimal_workers file not found. Setting LANGFLOW_WORKERS to default value: $${WORKERS}. ---"; \
+		echo "--- .optimal_workers file not found. Setting WEB_CONCURRENCY to default value: $${WORKERS}. ---"; \
 	fi; \
-	kubectl patch configmap langflow-config --patch "{\"data\":{\"LANGFLOW_WORKERS\":\"$${WORKERS}\"}}";
+	kubectl patch configmap langflow-config --patch "{\"data\":{\"WEB_CONCURRENCY\":\"$${WORKERS}\"}}";
 
 check-workers:
 	@echo "--- Checking Langflow worker status ---"; \
-	CONFIGURED_WORKERS=$$(kubectl get configmap langflow-config -o jsonpath='{.data.LANGFLOW_WORKERS}' 2>/dev/null || echo "Not Set"); \
+	CONFIGURED_WORKERS=$$(kubectl get configmap langflow-config -o jsonpath='{.data.WEB_CONCURRENCY}' 2>/dev/null || echo "Not Set"); \
 	LANGFLOW_POD=$$(kubectl get pods -l app=langflow -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); \
 	\
 	if [ -z "$$LANGFLOW_POD" ]; then \

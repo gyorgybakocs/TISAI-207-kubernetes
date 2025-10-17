@@ -21,8 +21,8 @@ echo "Benchmark Job Started. Target Flow ID: $FLOW_ID. Test type: $BENCHMARK_TYP
 for workers in $WORKER_COUNTS; do
   echo "\n--- Testing with $workers workers ---"
 
-  echo "Patching ConfigMap to set LANGFLOW_WORKERS=$workers..."
-  kubectl patch configmap langflow-config --patch "{\"data\":{\"LANGFLOW_WORKERS\":\"$workers\"}}"
+  echo "Patching ConfigMap to set WEB_CONCURRENCY=$workers..."
+  kubectl patch configmap langflow-config --patch "{\"data\":{\"WEB_CONCURRENCY\":\"$workers\"}}"
 
   echo "Restarting Langflow deployment..."
   kubectl rollout restart deployment/langflow
@@ -40,7 +40,11 @@ for workers in $WORKER_COUNTS; do
   if [ "$BENCHMARK_TYPE" = "hey" ]; then
     echo "Running HEY benchmark..."
     JSON_PAYLOAD='{"input_value": "hello", "input_type": "text", "output_type": "text"}'
-    RESULT=$(hey -z 30s -c 10 -t 15 -disable-keepalive -H "x-api-key: $API_KEY" -H "Content-Type: application/json" -m POST -d "$JSON_PAYLOAD" "$LANGFLOW_SERVER_URL/api/v1/run/$FLOW_ID?stream=false")
+    CONC=$(( workers * 25 ))
+    RESULT=$(hey -z 30s -c $CONC -t 30 \
+      -H "x-api-key: $API_KEY" -H "Content-Type: application/json" \
+      -m POST -d "$JSON_PAYLOAD" \
+      "$LANGFLOW_SERVER_URL/api/v1/run/$FLOW_ID?stream=false")
     RPS=$(echo "$RESULT" | awk '/Requests\/sec:/ {print $2}')
 
     HTTP_ERRORS=$(echo "$RESULT" | awk '/\[5..\]/ {sum+=$2} END {print sum+0}')
@@ -52,7 +56,11 @@ for workers in $WORKER_COUNTS; do
     export FLOW_ID
     export API_KEY
     CSV_PREFIX="locust_results_${workers}"
-    RESULT=$(locust -f /app/locustfile.py --headless --users 10 --spawn-rate 2 -t 30s --host "$LANGFLOW_SERVER_URL" --csv="$CSV_PREFIX" --exit-code-on-error 1)
+
+    RESULT=$(locust -f /app/locustfile.py --headless \
+      --users $(( workers * 50 )) --spawn-rate $(( workers * 25 )) \
+      -t 30s --host "$LANGFLOW_SERVER_URL" \
+      --csv="$CSV_PREFIX" --exit-code-on-error 1)
 
     STATS_CSV_FILE="${CSV_PREFIX}_stats.csv"
 
@@ -92,7 +100,7 @@ for workers in $WORKER_COUNTS; do
   fi
 
   if [ "$ERROR_COUNT" -gt "$FAILURE_THRESHOLD" ]; then
-    echo "\n--- System overloaded at $workers workers (Errors: $ERROR_COUNT_INT) ---"
+    echo "\n--- System overloaded at $workers workers (Errors: $ERROR_COUNT) ---"
     echo "Stopping benchmark prematurely."
     break
   fi
@@ -103,7 +111,7 @@ echo "\n--- Benchmark Finished ---"
 echo "Optimal worker count: $BEST_WORKERS ($MAX_RPS Requests/sec)"
 
 echo "Patching ConfigMap with final optimal worker count: $BEST_WORKERS"
-kubectl patch configmap langflow-config --patch "{\"data\":{\"LANGFLOW_WORKERS\":\"$BEST_WORKERS\"}}"
+kubectl patch configmap langflow-config --patch "{\"data\":{\"WEB_CONCURRENCY\":\"$BEST_WORKERS\"}}"
 
 echo -n "$BEST_WORKERS" > .optimal_workers
 echo "Benchmark complete. Result saved to .optimal_workers"

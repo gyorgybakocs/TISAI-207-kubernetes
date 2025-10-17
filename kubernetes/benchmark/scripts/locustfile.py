@@ -1,8 +1,8 @@
 import os
-from locust import HttpUser, task, between
+from locust import HttpUser, task, between, constant
 
 class BenchmarkUser(HttpUser):
-    wait_time = between(0.5, 2.5)
+    wait_time = constant(0.0)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

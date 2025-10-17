@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# ssh -p 58178 root@153.213.11.44 -L 8080:localhost:8080
+# ssh -p 47054 root@76.66.207.49 -L 8080:localhost:8080
 
-INSTANCE_IP=${1:-"153.213.11.44"}
-INSTANCE_PORT=${2:-"58178"}
+INSTANCE_IP=${1:-"76.66.207.49"}
+INSTANCE_PORT=${2:-"47054"}

@@ -6,9 +6,9 @@ metadata:
 spec:
   limits:
   - default:
-      memory: 27Gi
-      cpu: "14"
+      memory: ${LIMIT_MEM}
+      cpu: "${LIMIT_CPU}"
     defaultRequest:
-      memory: 2Gi
-      cpu: "1"
+      memory: ${REQUEST_MEM}
+      cpu: "${REQUEST_CPU}"
     type: Container
